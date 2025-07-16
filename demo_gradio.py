@@ -103,7 +103,7 @@ os.makedirs(outputs_folder, exist_ok=True)
 
 
 @torch.no_grad()
-def worker(input_image, prompt, n_prompt, seed, total_second_length, latent_window_size, steps, cfg, gs, rs, gpu_memory_preservation, use_teacache, mp4_crf, resolution, lora_file, lora_multiplier):
+def worker(input_image, end_frame, prompt, n_prompt, seed, total_second_length, latent_window_size, steps, cfg, gs, rs, gpu_memory_preservation, use_teacache, mp4_crf, resolution, lora_file, lora_multiplier):
     global transformer, previous_lora_file, previous_lora_multiplier
 
     model_changed = transformer is None or (
@@ -164,6 +164,16 @@ def worker(input_image, prompt, n_prompt, seed, total_second_length, latent_wind
             load_model_as_complete(vae, target_device=gpu)
 
         start_latent = vae_encode(input_image_pt, vae)
+
+        # Final Flame(Optional)
+        if end_frame is not None:
+            end_frame_np = resize_and_center_crop(end_frame, target_width=width, target_height=height)
+            Image.fromarray(end_frame_np).save(os.path.join(outputs_folder, f'{job_id}_end.png'))
+            end_frame_pt = torch.from_numpy(end_frame_np).float() / 127.5 - 1
+            end_frame_pt = end_frame_pt.permute(2, 0, 1)[None, :, None]
+            end_frame_latent = vae_encode(end_frame_pt, vae)
+        else: 
+            end_frame_latent = None
 
         # CLIP Vision
 
@@ -232,15 +242,22 @@ def worker(input_image, prompt, n_prompt, seed, total_second_length, latent_wind
         if total_latent_sections > 4:
             latent_paddings = [3] + [2] * (total_latent_sections - 3) + [1, 0]
 
+        is_first_section = True
         for latent_padding in latent_paddings:
             is_last_section = latent_padding == 0
             latent_padding_size = latent_padding * latent_window_size
 
+            print(f'latent_padding_size = {latent_padding_size}')
+            print(f'is_first_section = {is_first_section}, is_last_section = {is_last_section}')
+
+            if is_first_section:
+                is_first_section = False
+                if end_frame_latent is not None:
+                    history_latents[:, :, 0:1, :, :] = end_frame_latent
+
             if stream.input_queue.top() == 'end':
                 stream.output_queue.push(('end', None))
                 return
-
-            print(f'latent_padding_size = {latent_padding_size}, is_last_section = {is_last_section}')
 
             indices = torch.arange(0, sum([1, latent_padding_size, latent_window_size, 1, 2, 16])).unsqueeze(0)
             clean_latent_indices_pre, blank_indices, latent_indices, clean_latent_indices_post, clean_latent_2x_indices, clean_latent_4x_indices = indices.split([1, latent_padding_size, latent_window_size, 1, 2, 16], dim=1)
@@ -353,7 +370,7 @@ def worker(input_image, prompt, n_prompt, seed, total_second_length, latent_wind
     return
 
 
-def process(input_image, prompt, n_prompt, seed, total_second_length, latent_window_size, steps, cfg, gs, rs, gpu_memory_preservation, use_teacache, mp4_crf, resolution, lora_file, lora_multiplier):
+def process(input_image, end_frame, prompt, n_prompt, seed, total_second_length, latent_window_size, steps, cfg, gs, rs, gpu_memory_preservation, use_teacache, mp4_crf, resolution, lora_file, lora_multiplier):
     global stream
     assert input_image is not None, 'No input image!'
 
@@ -361,7 +378,7 @@ def process(input_image, prompt, n_prompt, seed, total_second_length, latent_win
 
     stream = AsyncStream()
 
-    async_run(worker, input_image, prompt, n_prompt, seed, total_second_length, latent_window_size, steps, cfg, gs, rs, gpu_memory_preservation, use_teacache, mp4_crf, resolution, lora_file, lora_multiplier)
+    async_run(worker, input_image, end_frame, prompt, n_prompt, seed, total_second_length, latent_window_size, steps, cfg, gs, rs, gpu_memory_preservation, use_teacache, mp4_crf, resolution, lora_file, lora_multiplier)
 
     output_filename = None
 
@@ -432,6 +449,7 @@ with block:
                 lora_multiplier = gr.Slider(label="LoRA Multiplier", minimum=0.0, maximum=1.0, value=0.8, step=0.1)
 
         with gr.Column():
+            end_frame = gr.Image(sources='upload', type="numpy", label="Final Frame (Optional)", height=320)
             preview_image = gr.Image(label="Next Latents", height=200, visible=False)
             result_video = gr.Video(label="Finished Frames", autoplay=True, show_share_button=False, height=512, loop=True)
             gr.Markdown('Note that the ending actions will be generated before the starting actions due to the inverted sampling. If the starting action is not in the video, you just need to wait, and it will be generated later.')
@@ -440,7 +458,7 @@ with block:
 
     gr.HTML('<div style="text-align:center; margin-top:20px;">Share your results and find ideas at the <a href="https://x.com/search?q=framepack&f=live" target="_blank">FramePack Twitter (X) thread</a></div>')
 
-    ips = [input_image, prompt, n_prompt, seed, total_second_length, latent_window_size, steps, cfg, gs, rs, gpu_memory_preservation, use_teacache, mp4_crf, resolution, lora_file, lora_multiplier]
+    ips = [input_image, end_frame, prompt, n_prompt, seed, total_second_length, latent_window_size, steps, cfg, gs, rs, gpu_memory_preservation, use_teacache, mp4_crf, resolution, lora_file, lora_multiplier]
     start_button.click(fn=process, inputs=ips, outputs=[result_video, preview_image, progress_desc, progress_bar, start_button, end_button])
     end_button.click(fn=end_process)
 
